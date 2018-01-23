@@ -9,6 +9,8 @@ import (
 	"sync"
 
 	"github.com/gorilla/websocket"
+	"github.com/darksawa/go-cloudflare-scraper"
+	"net/http/cookiejar"
 )
 
 type negotiationResponse struct {
@@ -47,14 +49,28 @@ type serverMessage struct {
 	Error      string            `json:"E"`
 }
 
-func negotiate(scheme, address string) (negotiationResponse, error) {
+func negotiate(scheme, address string, jar *cookiejar.Jar) (negotiationResponse, error) {
 	var response negotiationResponse
 
 	var negotiationUrl = url.URL{Scheme: scheme, Host: address, Path: "/signalr/negotiate"}
 
-	client := &http.Client{}
+	stransport, err := scraper.NewTransportWithCookie(&http.Transport{}, jar)
+	if err != nil {
+		return response, err
+	}
 
-	reply, err := client.Get(negotiationUrl.String())
+	client := &http.Client{
+		Transport: stransport,
+		Jar: stransport.GetCookies(),
+	}
+
+	req, err := http.NewRequest("GET", negotiationUrl.String(), nil)
+	req.Header.Set("User-Agent", `Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.36`)
+	if err != nil {
+		return response, err
+	}
+	reply, err :=  client.Do(req)
+
 	if err != nil {
 		return response, err
 	}
@@ -70,7 +86,7 @@ func negotiate(scheme, address string) (negotiationResponse, error) {
 	}
 }
 
-func connectWebsocket(address string, params negotiationResponse, hubs []string) (*websocket.Conn, error) {
+func connectWebsocket(address string, params negotiationResponse, hubs []string, jar http.CookieJar) (*websocket.Conn, error) {
 	var connectionData = make([]struct {
 		Name string `json:"Name"`
 	}, len(hubs))
@@ -91,7 +107,11 @@ func connectWebsocket(address string, params negotiationResponse, hubs []string)
 	var connectionUrl = url.URL{Scheme: "wss", Host: address, Path: "signalr/connect"}
 	connectionUrl.RawQuery = connectionParameters.Encode()
 
-	if conn, _, err := websocket.DefaultDialer.Dial(connectionUrl.String(), nil); err != nil {
+	dialer := websocket.Dialer{Jar: jar}
+	header := http.Header{}
+	header.Set("User-Agent", `Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.36`)
+
+	if conn, _, err := dialer.Dial(connectionUrl.String(), header); err != nil {
 		return nil, err
 	} else {
 		return conn, nil
@@ -244,14 +264,18 @@ func (self *Client) CallHub(hub, method string, params ...interface{}) (json.Raw
 
 func (self *Client) Connect(scheme, host string, hubs []string) error {
 	// Negotiate parameters.
-	if params, err := negotiate(scheme, host); err != nil {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return err
+	}
+	if params, err := negotiate(scheme, host, jar); err != nil {
 		return err
 	} else {
 		self.params = params
 	}
 
 	// Connect Websocket.
-	if ws, err := connectWebsocket(host, self.params, hubs); err != nil {
+	if ws, err := connectWebsocket(host, self.params, hubs, jar); err != nil {
 		return err
 	} else {
 		self.socket = ws
